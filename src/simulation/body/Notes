@@ -1,0 +1,8 @@
+Abstract body of some description - Interface or Abstract?
+     specific bodies
+         -mass
+         -3D positioning data inc velocities, angles.
+             -retain history?
+         -calculate path based on ecliptic model
+         -forward sim for all forces?
+         -

@@ -1,0 +1,334 @@
+void draw_closeup_window (void)
+  // Draws the close-up view of the lander
+{
+  static double terrain_offset_x = 0.0;
+  static double terrain_offset_y = 0.0;
+  static double ground_line_offset = 0.0;
+  static double last_redraw_time = 0.0;
+  static unsigned short rn = 0;
+  vector3d s, t, n;
+  double lander_drag, chute_drag, glow_factor, aspect_ratio, view_depth, f, tmp, cs, gs;
+  double horizon, fog_density, cx, cy, m[16], m2[16], transition_altitude, ground_plane_size;
+  unsigned short i, j, rtmp;
+  GLfloat fogcolour[4];
+  bool dark_side;
+  float rand_tri[8];
+
+  glutSetWindow(closeup_window);
+  aspect_ratio = (double)view_width/view_height;
+  if (do_texture) transition_altitude = TRANSITION_ALTITUDE;
+  else transition_altitude = TRANSITION_ALTITUDE_NO_TEXTURE;
+  ground_plane_size = 5.0*transition_altitude;
+
+  // Work out an atmospheric haze colour based on prevailing atmospheric density. The power law in the
+  // expression below couples with the fog calculation further down, to ensure that the fog doesn't dim
+  // the scene on the way down.
+  tmp = pow(atmospheric_density(position)/atmospheric_density(vector3d(MARS_RADIUS, 0.0, 0.0)), 0.5);
+  if (static_lighting) tmp *= 0.5 * (1.0 + position.norm()*vector3d(0.0, -1.0, 0.0)); // set sky colour
+  fogcolour[0] = tmp*0.98; fogcolour[1] = tmp*0.67; fogcolour[2] = tmp*0.52; fogcolour[3] = 0.0;
+  glClearColor(tmp*0.98, tmp*0.67, tmp*0.52, 0.0);
+
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  if (altitude < 0.0) { // just blank the screen if the lander is below the surface
+    glutSwapBuffers();
+    return;
+  }
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+
+  // Set projection matrix and fog values based on altitude.
+  // Above the exosphere we see a long way and there is no fog.
+  // Between the exosphere and transition_altitude, we see up to the horizon with increasing fog.
+  // At transition_altitude we have a totally opaque haze, to disguise the transition from spherical surface to flat surface.
+  // Below transition_altitude, we can see as far as the horizon (or transition_altitude with no terrain texture),
+  // with the fog decreasing towards touchdown.
+  if (altitude > EXOSPHERE) gluPerspective(CLOSEUP_VIEW_ANGLE, aspect_ratio, 1.0, closeup_offset + 2.0*MARS_RADIUS);
+  else {
+    horizon = sqrt(position.abs2() - MARS_RADIUS*MARS_RADIUS);
+    if (altitude > transition_altitude) {
+      f = (altitude-transition_altitude) / (EXOSPHERE-transition_altitude);
+      if (f < SMALL_NUM) fog_density = 1000.0; else fog_density = (1.0-f) / (f*horizon);
+      view_depth = closeup_offset + horizon;
+    } else {
+      f = 1.0 - (altitude / transition_altitude);
+      if (f < SMALL_NUM) fog_density = 1000.0; else fog_density = (1.0-f) / (f*transition_altitude);
+      if (do_texture) {
+	fog_density = 0.00005 + 0.5*fog_density;
+	view_depth = closeup_offset + horizon;
+      } else view_depth = closeup_offset + transition_altitude;
+    }
+    gluPerspective(CLOSEUP_VIEW_ANGLE, aspect_ratio, 1.0, view_depth);
+    glFogf(GL_FOG_DENSITY, fog_density);
+    glFogfv(GL_FOG_COLOR, fogcolour);
+    if (do_texture) glHint(GL_FOG_HINT, GL_NICEST);
+    else glHint(GL_FOG_HINT, GL_FASTEST);
+    glEnable(GL_FOG);
+  }
+
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+
+  // The world coordinate system in this view is centered on the lander, with y-axis vertical
+  // (from planet centre to lander) and x-axis parallel to the lander's tangential velocity.
+  // We now need a modelling rotation transformation to map from this system to the planetary
+  // coordinate system.
+
+  // Direction from surface to lander (radial) - this must map to the world y-axis
+  s = position.norm();
+
+  // Direction of tangential velocity - this must map to the world x-axis
+  t = closeup_coords.backwards ? -closeup_coords.right : closeup_coords.right;
+
+  // Mutual perpendicular to these two vectors - this must map to the world z-axis
+  n = t^s;
+
+  // Construct modelling matrix (rotation only) from these three vectors
+  m[0] = t.x; m[1] = t.y; m[2] = t.z; m[3] = 0.0;
+  m[4] = s.x; m[5] = s.y; m[6] = s.z; m[7] = 0.0;
+  m[8] = n.x; m[9] = n.y; m[10] = n.z; m[11] = 0.0;
+  m[12] = 0.0; m[13] = 0.0; m[14] = 0.0; m[15] = 1.0;
+  invert(m, m2);
+
+  // Update terrain texture/line offsets
+  if (simulation_time != last_redraw_time) {
+    terrain_offset_x += cos(terrain_angle*M_PI/180.0) * ground_speed * (simulation_time-last_redraw_time) / (2.0*ground_plane_size);
+    terrain_offset_y += sin(terrain_angle*M_PI/180.0) * ground_speed * (simulation_time-last_redraw_time) / (2.0*ground_plane_size);
+    while (terrain_offset_x < 0.0) terrain_offset_x += 1.0;
+    while (terrain_offset_x >= 1.0) terrain_offset_x -= 1.0;
+    while (terrain_offset_y < 0.0) terrain_offset_y += 1.0;
+    while (terrain_offset_y >= 1.0) terrain_offset_y -= 1.0;
+    if (closeup_coords.backwards) ground_line_offset += ground_speed * (simulation_time-last_redraw_time);
+    else ground_line_offset -= ground_speed * (simulation_time-last_redraw_time);
+    ground_line_offset -= GROUND_LINE_SPACING*((int)ground_line_offset/(int)(GROUND_LINE_SPACING));
+    last_redraw_time = simulation_time;
+  }
+
+  // Viewing transformation
+  glTranslated(0.0, 0.0, -closeup_offset);
+  glRotated(closeup_xr, 1.0, 0.0, 0.0);
+  glRotated(closeup_yr + closeup_coords.backwards*180.0, 0.0, 1.0, 0.0);
+
+  if (static_lighting) {
+    // Specify light positions here, to fix them in the planetary coordinate system
+    glPushMatrix();
+    glMultMatrixd(m2); // now in the planetary coordinate system
+    glLightfv(GL_LIGHT2, GL_POSITION, minus_y);
+    glLightfv(GL_LIGHT3, GL_POSITION, plus_y);
+    glLightfv(GL_LIGHT4, GL_POSITION, plus_y);
+    glLightfv(GL_LIGHT5, GL_POSITION, plus_z);
+    glPopMatrix(); // back to the view's world coordinate system
+  }
+
+  // Surface colour
+  glColor3f(0.63, 0.33, 0.22);
+
+  if (altitude < transition_altitude) {
+
+    // Draw ground plane below the lander's current position - we need to do this in quarters, with a vertex
+    // nearby, to get the fog calculations correct in all OpenGL implementations.
+    glBindTexture(GL_TEXTURE_2D, terrain_texture);
+    if (do_texture) glEnable(GL_TEXTURE_2D);
+    glNormal3d(0.0, 1.0, 0.0);
+    glPushMatrix();
+    glRotated(terrain_angle, 0.0, 1.0, 0.0);
+    glBegin(GL_QUADS);
+    glTexCoord2f(1.0 + terrain_offset_x, 1.0 + terrain_offset_y); glVertex3d(ground_plane_size, -altitude, ground_plane_size);
+    glTexCoord2f(1.0 + terrain_offset_x, 0.5 + terrain_offset_y); glVertex3d(ground_plane_size, -altitude, 0.0);
+    glTexCoord2f(0.5 + terrain_offset_x, 0.5 + terrain_offset_y); glVertex3d(0.0, -altitude, 0.0);
+    glTexCoord2f(0.5 + terrain_offset_x, 1.0 + terrain_offset_y); glVertex3d(0.0, -altitude, ground_plane_size);
+    glTexCoord2f(0.5 + terrain_offset_x, 0.5 + terrain_offset_y); glVertex3d(0.0, -altitude, 0.0);
+    glTexCoord2f(1.0 + terrain_offset_x, 0.5 + terrain_offset_y); glVertex3d(ground_plane_size, -altitude, 0.0);
+    glTexCoord2f(1.0 + terrain_offset_x, 0.0 + terrain_offset_y); glVertex3d(ground_plane_size, -altitude, -ground_plane_size);
+    glTexCoord2f(0.5 + terrain_offset_x, 0.0 + terrain_offset_y); glVertex3d(0.0, -altitude, -ground_plane_size);
+    glTexCoord2f(0.5 + terrain_offset_x, 0.5 + terrain_offset_y); glVertex3d(0.0, -altitude, 0.0);
+    glTexCoord2f(0.5 + terrain_offset_x, 0.0 + terrain_offset_y); glVertex3d(0.0, -altitude, -ground_plane_size);
+    glTexCoord2f(0.0 + terrain_offset_x, 0.0 + terrain_offset_y); glVertex3d(-ground_plane_size, -altitude, -ground_plane_size);
+    glTexCoord2f(0.0 + terrain_offset_x, 0.5 + terrain_offset_y); glVertex3d(-ground_plane_size, -altitude, 0.0);
+    glTexCoord2f(0.5 + terrain_offset_x, 1.0 + terrain_offset_y); glVertex3d(0.0, -altitude, ground_plane_size);
+    glTexCoord2f(0.5 + terrain_offset_x, 0.5 + terrain_offset_y); glVertex3d(0.0, -altitude, 0.0);
+    glTexCoord2f(0.0 + terrain_offset_x, 0.5 + terrain_offset_y); glVertex3d(-ground_plane_size, -altitude, 0.0);
+    glTexCoord2f(0.0 + terrain_offset_x, 1.0 + terrain_offset_y); glVertex3d(-ground_plane_size, -altitude, ground_plane_size);
+    glEnd();
+    glPopMatrix();
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_DEPTH_TEST);
+
+    if (!do_texture) { // draw lines on the ground plane at constant x (to show ground speed)
+      glEnable(GL_BLEND);
+      glLineWidth(2.0);
+      glBegin(GL_LINES);
+      if (closeup_coords.backwards) tmp = -ground_line_offset - transition_altitude;
+      else tmp = ground_line_offset + transition_altitude;
+      while ((closeup_coords.backwards ? -tmp : tmp) > -transition_altitude) {
+	// Fade the lines out towards the horizon, to avoid aliasing artefacts. The fade is a function of distance from the
+	// centre (tmp) and altitude: the lower the lander gets, the more pronounced the fade.
+	// We need to do draw each line in two parts, with a vertex nearby, to get the fog calculations correct in all OpenGL implementations.
+	// To make the lines fade more strongly when landed, decrease the second number.
+	// To make the lines less apparent at high altitude, decrease the first number.
+	f = exp( -fabs( pow((transition_altitude-altitude) / transition_altitude, 10.0) * tmp / (10.0*GROUND_LINE_SPACING)) );
+	glColor4f(0.32, 0.17, 0.11, f);
+	glVertex3d(tmp, -altitude, -transition_altitude);
+	glVertex3d(tmp, -altitude, 0.0);
+	glVertex3d(tmp, -altitude, 0.0);
+	glVertex3d(tmp, -altitude, transition_altitude);
+	if (closeup_coords.backwards) tmp += GROUND_LINE_SPACING;
+	else tmp -= GROUND_LINE_SPACING;
+      }
+      glEnd();
+      glDisable(GL_BLEND);
+    }
+
+    if (!crashed) { // draw a circular shadow below the lander
+      glColor3f(0.32, 0.17, 0.11);
+      glBegin(GL_TRIANGLES);
+      for (i=0; i<360; i+=10) {
+	glVertex3d(0.0, -altitude, 0.0);
+	glVertex3d(LANDER_SIZE*cos(M_PI*(i+10)/180.0), -altitude, LANDER_SIZE*sin(M_PI*(i+10)/180.0));
+	glVertex3d(LANDER_SIZE*cos(M_PI*i/180.0), -altitude, LANDER_SIZE*sin(M_PI*i/180.0));
+      }
+      glEnd();
+    } else {
+      rtmp = 0;
+      glColor3f(1.0, 1.0, 1.0);
+      glBegin(GL_TRIANGLES); // draw some shards of metal
+      for (i=0; i<60; i++) {
+	for (j=0; j<8; j++) { rand_tri[j] = randtab[rtmp]; rtmp = (rtmp+1)%N_RAND; }
+	cx = 40.0 * (rand_tri[0] - 0.5);
+	cy = 40.0 * (rand_tri[1] - 0.5);
+	glNormal3d(0.0, 1.0, 0.0);
+	glVertex3d(cx + 2.0*LANDER_SIZE*rand_tri[2], -altitude, cy + 2.0*LANDER_SIZE*rand_tri[3]);
+	glVertex3d(cx + 2.0*LANDER_SIZE*rand_tri[4], -altitude, cy + 2.0*LANDER_SIZE*rand_tri[5]);
+	glVertex3d(cx + 2.0*LANDER_SIZE*rand_tri[6], -altitude, cy + 2.0*LANDER_SIZE*rand_tri[7]);
+      }
+      glEnd();
+      if (parachute_status != LOST) {
+	glColor3f(1.0, 1.0, 0.0);
+	glBegin(GL_TRIANGLES);  // draw some shreds of yellow canvas
+	for (i=0; i<30; i++) {
+	  for (j=0; j<8; j++) { rand_tri[j] = randtab[rtmp]; rtmp = (rtmp+1)%N_RAND; }
+	  cx = 40.0 * (rand_tri[0] - 0.5);
+	  cy = 40.0 * (rand_tri[1] - 0.5);
+	  glNormal3d(0.0, 1.0, 0.0);
+	  glVertex3d(cx + 2.0*LANDER_SIZE*rand_tri[2], -altitude, cy + 2.0*LANDER_SIZE*rand_tri[3]);
+	  glVertex3d(cx + 2.0*LANDER_SIZE*rand_tri[4], -altitude, cy + 2.0*LANDER_SIZE*rand_tri[5]);
+	  glVertex3d(cx + 2.0*LANDER_SIZE*rand_tri[6], -altitude, cy + 2.0*LANDER_SIZE*rand_tri[7]);
+	}
+	glEnd();
+      }
+    }
+    glEnable(GL_DEPTH_TEST);
+
+  } else {
+
+    // Draw spherical planet - can disable depth test (for speed)
+    glDisable(GL_DEPTH_TEST);
+    glPushMatrix();
+
+    if (altitude > EXOSPHERE) {
+
+      // Draw the planet reduced size at a reduced displacement, to avoid numerical OpenGL problems with huge viewing distances.
+      glTranslated(0.0, -MARS_RADIUS, 0.0);
+      glMultMatrixd(m2); // now in the planetary coordinate system
+      glRotated(360.0*simulation_time/MARS_DAY, 0.0, 0.0, 1.0); // to make the planet spin
+      glutMottledSphere(MARS_RADIUS * (MARS_RADIUS / (altitude + MARS_RADIUS)), 160, 100);
+
+    } else {
+
+      // Draw the planet actual size at the correct displacement
+      glTranslated(0.0, -(MARS_RADIUS + altitude), 0.0);
+      glMultMatrixd(m2); // now in the planetary coordinate system
+      glRotated(360.0*simulation_time/MARS_DAY, 0.0, 0.0, 1.0); // to make the planet spin
+      glutMottledSphere(MARS_RADIUS, 160, 100);
+
+    }
+
+    glPopMatrix(); // back to the view's world coordinate system
+    glEnable(GL_DEPTH_TEST);
+
+  }
+
+  glDisable(GL_FOG); // fog only applies to the ground
+  dark_side = (static_lighting && (position.y > 0.0) && (sqrt(position.x*position.x + position.z*position.z) < MARS_RADIUS));
+  if (dark_side) { // in the shadow of the planet, we need some diffuse lighting to highlight the lander
+    glDisable(GL_LIGHT2); glDisable(GL_LIGHT3);
+    glEnable(GL_LIGHT4); glEnable(GL_LIGHT5);
+  }
+
+  // Work out drag on lander - if it's high, we will surround the lander with an incandescent glow. Also
+  // work out drag on parachute: if it's zero, we will not draw the parachute fully open behind the lander.
+  // Assume high Reynolds number, quadratic drag = -0.5 * rho * v^2 * A * C_d
+  lander_drag = 0.5*DRAG_COEF_LANDER*atmospheric_density(position)*M_PI*LANDER_SIZE*LANDER_SIZE*velocity_from_positions.abs2();
+  chute_drag = 0.5*DRAG_COEF_CHUTE*atmospheric_density(position)*5.0*2.0*LANDER_SIZE*2.0*LANDER_SIZE*velocity_from_positions.abs2();
+
+  // Draw the lander's parachute - behind the lander in the direction of travel
+  if ( (parachute_status == DEPLOYED) && !crashed ) {
+    if (velocity_from_positions.abs() < SMALL_NUM) {
+      // Lander is apparently stationary - so draw the parachute above and near to the lander
+      gs = 0.0; cs = -1.0; tmp = 2.0;
+    } else {
+      gs = ground_speed; cs = climb_speed;
+      if (chute_drag) tmp = 5.0; // parachute fully open
+      else tmp = 2.0; // parachute not fully open
+    }
+    glPushMatrix();
+    glRotated((180.0/M_PI)*atan2(cs, gs), 0.0, 0.0, 1.0);
+    draw_parachute(tmp);
+    glPopMatrix();
+  }
+
+  // Display help arrow to show surface direction
+  if (help) display_help_arrows();
+  else display_help_prompt();
+
+  // Switch to the planetary coordinate system
+  glPushMatrix();
+  glMultMatrixd(m2);
+
+  // Lander orientation relative to planetary coordinate system - xyz Euler angles
+  xyz_euler_to_matrix(orientation, m);
+  glMultMatrixd(m);
+
+  // Put lander's centre of gravity at the origin
+  glTranslated(0.0, 0.0, -LANDER_SIZE/2);
+
+  // Draw lander
+  if (!crashed) {
+    glColor3f(1.0, 1.0, 1.0);
+    glutCone(LANDER_SIZE, LANDER_SIZE, 50, 50, true);
+  }
+
+  if (dark_side) { // back to standard lighting model
+    glEnable(GL_LIGHT2); glEnable(GL_LIGHT3);
+    glDisable(GL_LIGHT4); glDisable(GL_LIGHT5);
+  }
+
+  // Draw engine exhaust flare
+  if (thrust_wrt_world().abs() > 0.0) {
+    glColor3f(1.0, 0.5, 0.0);
+    glRotated(180.0, 1.0, 0.0, 0.0);
+    glDisable(GL_LIGHTING);
+    glutCone(LANDER_SIZE/2, 2*LANDER_SIZE*thrust_wrt_world().abs()/MAX_THRUST, 50, 50, false);
+    glEnable(GL_LIGHTING);
+  }
+
+  glPopMatrix(); // back to the world coordinate system
+
+  // Draw incandescent glow surrounding lander
+  if (lander_drag*velocity_from_positions.abs() > HEAT_FLUX_GLOW_THRESHOLD) {
+    // Calculate an heuristic "glow factor", in the range 0 to 1, for graphics effects
+    glow_factor = (lander_drag*velocity_from_positions.abs()-HEAT_FLUX_GLOW_THRESHOLD) / (4.0*HEAT_FLUX_GLOW_THRESHOLD);
+    if (glow_factor > 1.0) glow_factor = 1.0;
+    glow_factor *= 0.7 + 0.3*randtab[rn]; rn = (rn+1)%N_RAND; // a little random variation for added realism
+    glRotated((180.0/M_PI)*atan2(climb_speed, ground_speed), 0.0, 0.0, 1.0);
+    glRotated(-90.0, 0.0, 1.0, 0.0);
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glColor4f(1.0, glow_factor, 0.0, 0.8*glow_factor);
+    glutCone(1.25*LANDER_SIZE, (2.0 + 10.0*glow_factor)*LANDER_SIZE, 50, 50+(int)(250*glow_factor), false);
+    glutOpenHemisphere(1.25*LANDER_SIZE, 50, 50);
+    glDisable(GL_BLEND);
+    glEnable(GL_LIGHTING);
+  }
+
+  glutSwapBuffers();
+}
